@@ -2,6 +2,16 @@ library(shiny)
 library(ggplot2)
 library(dplyr)
 library(shinythemes)
+library(shinydashboard)
+library(readr)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(ROCR)
+library(DT)
+library(tidyr)
+library(corrplot)
 
 # Fonction pour identifier les types de variables
 detect_var_type <- function(data, var) {
@@ -56,12 +66,46 @@ ui <- navbarPage(theme = shinytheme("darkly"),
     "Prédictions",
     sidebarLayout(
       sidebarPanel(
-        uiOutput("var_pred")
+        # Sélection de la variable à prédire
+        uiOutput("var_pred"),
+        
+        # Sélection des features
+        selectizeInput("features", "Features à utiliser:", choices = NULL, multiple = TRUE),
+        
+        # Choix du modèle
+        selectInput("model", "Modèle de ML:",
+                    choices = c("Random Forest" = "rf",
+                                "SVM" = "svm",
+                                "XGBoost" = "xgb")),
+        
+        # Proportion train/test
+        sliderInput("split", "Proportion d'entrainement:",
+                    min = 0.5, max = 0.9, value = 0.7),
+        
+        # Bouton pour lancer l'entrainement
+        actionButton("train", "Entraîner le modèle", class = "btn-primary")
       ),
       mainPanel(
-        plotOutput("histogram_plot"),
-        plotOutput("boxplot_plot"),
-        plotOutput("correlation_matrix_plot")
+        tabsetPanel(
+          # Onglets existants pour les résultats du modèle
+          tabPanel("Résultats du modèle",
+            conditionalPanel(
+              condition = "output.modelTrained",
+                     
+              tabsetPanel(
+                tabPanel("Métriques",
+                    h3("Résultats de l'évaluation"),
+                        verbatimTextOutput("metrics")),
+                       
+                tabPanel("Importance des features",
+                    plotOutput("featImportance")),
+                    
+                tabPanel("Courbe ROC",
+                    plotOutput("rocCurve"))
+              )
+            )
+          )
+        )
       )
     )
   )
@@ -83,6 +127,10 @@ server <- function(input, output, session) {
     })
   })
   
+  # Variables pour la prédiction
+  model <- reactiveVal()
+  predictions <- reactiveVal()
+  
   # Générer les sélections de variables
   output$var_select <- renderUI({
     req(dataset())
@@ -97,7 +145,155 @@ server <- function(input, output, session) {
   output$var_pred <- renderUI({
     req(dataset())
     vars <- names(dataset())
-    selectInput("var_exploration", "Sélectionner une variable cible :", choices = vars)
+    selectInput("target", "Sélectionner une variable cible :", choices = vars)
+  })
+  
+  # Chargement des données
+  observeEvent(input$file, {
+    df <- read_csv(input$file$datapath)
+    data <- df
+    
+    # Mise à jour des choix de variables
+    updateSelectInput(session, "target",
+                      choices = names(df))
+    updateSelectizeInput(session, "features",
+                         choices = names(df))
+    updateSelectInput(session, "var_to_plot",
+                      choices = names(df))
+  })
+  
+  # Entraînement du modèle
+  observeEvent(input$train, {
+    req(data(), input$target, input$features)
+    
+    # Préparation des données
+    df <- data()
+    features <- input$features
+    target <- input$target
+    
+    # Création du jeu de données
+    model_data <- df %>%
+      select(all_of(c(target, features))) %>%
+      na.omit()
+    
+    # Split train/test
+    set.seed(123)
+    trainIndex <- createDataPartition(model_data[[target]], p = input$split, list = FALSE)
+    training <- model_data[trainIndex, ]
+    testing <- model_data[-trainIndex, ]
+    
+    # Entraînement selon le modèle choisi
+    fitted_model <- switch(input$model,
+                           "rf" = {
+                             rf_model <- randomForest(as.formula(paste(target, "~ .")),
+                                                      data = training)
+                             list(model = rf_model,
+                                  pred = predict(rf_model, testing),
+                                  importance = importance(rf_model))
+                           },
+                           "svm" = {
+                             svm_model <- svm(as.formula(paste(target, "~ .")),
+                                              data = training,
+                                              probability = TRUE)
+                             list(model = svm_model,
+                                  pred = predict(svm_model, testing),
+                                  importance = NULL)
+                           },
+                           "xgb" = {
+                             # Préparation pour XGBoost
+                             train_matrix <- model.matrix(as.formula(paste("~", paste(features, collapse = "+"))), data = training)
+                             test_matrix <- model.matrix(as.formula(paste("~", paste(features, collapse = "+"))), data = testing)
+                             
+                             xgb_model <- xgboost(data = train_matrix,
+                                                  label = training[[target]],
+                                                  nrounds = 100,
+                                                  objective = "binary:logistic")
+                             
+                             list(model = xgb_model,
+                                  pred = predict(xgb_model, test_matrix),
+                                  importance = xgb.importance(feature_names = colnames(train_matrix), model = xgb_model))
+                           }
+    )
+    
+    model(fitted_model)
+    predictions(list(pred = fitted_model$pred,
+                     actual = testing[[target]]))
+  })
+  
+  # Indicateur de modèle entraîné
+  output$modelTrained <- reactive({
+    !is.null(model())
+  })
+  outputOptions(output, "modelTrained", suspendWhenHidden = FALSE)
+  
+  
+  # Affichage des métriques
+  output$metrics <- renderPrint({
+    req(predictions())
+    
+    # Calcul des métriques
+    pred_obj <- prediction(predictions()$pred, predictions()$actual)
+    perf_auc <- performance(pred_obj, "auc")
+    auc <- perf_auc@y.values[[1]]
+    
+    # Conversion en classes binaires pour les autres métriques
+    pred_class <- ifelse(predictions()$pred > 0.5, 1, 0)
+    conf_matrix <- table(Actual = predictions()$actual, Predicted = pred_class)
+    
+    # Calcul precision, recall, F1
+    precision <- conf_matrix[2,2] / sum(conf_matrix[,2])
+    recall <- conf_matrix[2,2] / sum(conf_matrix[2,])
+    f1 <- 2 * (precision * recall) / (precision + recall)
+    
+    # Affichage
+    cat("Métriques d'évaluation:\n\n")
+    cat(sprintf("Precision: %.3f\n", precision))
+    cat(sprintf("Recall: %.3f\n", recall))
+    cat(sprintf("F1-Score: %.3f\n", f1))
+    cat(sprintf("AUC: %.3f\n", auc))
+  })
+  
+  # Graphique d'importance des features
+  output$featImportance <- renderPlot({
+    req(model())
+    
+    if (!is.null(model()$importance)) {
+      importance_df <- as.data.frame(model()$importance)
+      
+      if (input$model == "xgb") {
+        importance_df <- importance_df %>%
+          arrange(desc(Gain)) %>%
+          head(10)
+        
+        barplot(importance_df$Gain,
+                names.arg = importance_df$Feature,
+                main = "Importance des features (XGBoost)",
+                las = 2)
+      } else {
+        importance_df$Feature <- rownames(importance_df)
+        importance_df <- importance_df %>%
+          arrange(desc(IncNodePurity)) %>%
+          head(10)
+        
+        barplot(importance_df$IncNodePurity,
+                names.arg = importance_df$Feature,
+                main = "Importance des features (Random Forest)",
+                las = 2)
+      }
+    }
+  })
+  
+  # Courbe ROC
+  output$rocCurve <- renderPlot({
+    req(predictions())
+    
+    pred_obj <- prediction(predictions()$pred, predictions()$actual)
+    perf <- performance(pred_obj, "tpr", "fpr")
+    
+    plot(perf,
+         main = "Courbe ROC",
+         colorize = TRUE)
+    abline(a = 0, b = 1, lty = 2)
   })
   
   # Afficher l'extrait de la base de données (les 10 premières lignes)
