@@ -31,10 +31,11 @@ discretize_variable <- function(data, var, n_classes = 6) {
   return(data)
 }
 
+
 # Interface utilisateur
 ui <- navbarPage(theme = shinytheme("darkly"),
   title = "Visualisation des Données et Prédictions",
-  
+                 
   # Onglet principal : "Analyse et exploration"
   tabPanel(
     "Analyse et exploration",
@@ -60,7 +61,7 @@ ui <- navbarPage(theme = shinytheme("darkly"),
       )
     )
   ),
-  
+                 
   # Nouvel onglet "Prédictions"
   tabPanel(
     "Prédictions",
@@ -68,20 +69,20 @@ ui <- navbarPage(theme = shinytheme("darkly"),
       sidebarPanel(
         # Sélection de la variable à prédire
         uiOutput("var_pred"),
-        
+                       
         # Sélection des features
         selectizeInput("features", "Features à utiliser:", choices = NULL, multiple = TRUE),
-        
+                       
         # Choix du modèle
         selectInput("model", "Modèle de ML:",
                     choices = c("Random Forest" = "rf",
                                 "SVM" = "svm",
                                 "XGBoost" = "xgb")),
-        
+                       
         # Proportion train/test
         sliderInput("split", "Proportion d'entrainement:",
                     min = 0.5, max = 0.9, value = 0.7),
-        
+                       
         # Bouton pour lancer l'entrainement
         actionButton("train", "Entraîner le modèle", class = "btn-primary")
       ),
@@ -91,17 +92,17 @@ ui <- navbarPage(theme = shinytheme("darkly"),
           tabPanel("Résultats du modèle",
             conditionalPanel(
               condition = "output.modelTrained",
-                     
+                                    
               tabsetPanel(
                 tabPanel("Métriques",
-                    h3("Résultats de l'évaluation"),
-                        verbatimTextOutput("metrics")),
-                       
+                          h3("Résultats de l'évaluation"),
+                          verbatimTextOutput("metrics")),
+                                      
                 tabPanel("Importance des features",
-                    plotOutput("featImportance")),
-                    
+                          plotOutput("featImportance")),
+                                      
                 tabPanel("Courbe ROC",
-                    plotOutput("rocCurve"))
+                          plotOutput("rocCurve"))
               )
             )
           )
@@ -111,8 +112,9 @@ ui <- navbarPage(theme = shinytheme("darkly"),
   )
 )
 
-# Serveur
+
 server <- function(input, output, session) {
+  # ... [Code précédent inchangé jusqu'à l'observeEvent du train]
   # Charger les données avec gestion de l'encodage
   dataset <- reactive({
     req(input$file)
@@ -162,6 +164,12 @@ server <- function(input, output, session) {
                       choices = names(df))
   })
   
+  # Stockage des données dans une variable réactive
+  data <- reactive({
+    req(input$file)
+    read_csv(input$file$datapath)
+  })
+  
   # Entraînement du modèle
   observeEvent(input$train, {
     req(data(), input$target, input$features)
@@ -171,9 +179,9 @@ server <- function(input, output, session) {
     features <- input$features
     target <- input$target
     
-    # Création du jeu de données
+    # Création du jeu de données en utilisant dplyr explicitement
     model_data <- df %>%
-      select(all_of(c(target, features))) %>%
+      dplyr::select(all_of(c(target, features))) %>%
       na.omit()
     
     # Split train/test
